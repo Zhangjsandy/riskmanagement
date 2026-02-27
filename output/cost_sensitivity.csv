@@ -1,0 +1,4 @@
+﻿cost_fp,cost_fn,threshold,final_strategy,champion_model,selected_models,blend_weights,oof_auc,oof_pr_auc,oof_ks,oof_pred_pos,oof_pred_pos_rate,oof_fp,oof_fn,oof_cost,test_pred_pos,test_pred_pos_rate,test_mean_prob
+0.02,1.0,0.022222222222222223,weighted_blend,,xgboost;catboost;random_forest,0.3439;0.3310;0.3251,0.7092857142857143,0.08245744338610121,0.28775510204081634,259,0.518,251,2,7.0200000000000005,1033,0.5165,0.02305100495677983
+0.05,1.0,0.5,weighted_blend,,xgboost;catboost;random_forest,0.3439;0.3310;0.3251,0.7092857142857143,0.08245744338610121,0.28775510204081634,2,0.004,1,9,9.05,20,0.01,0.02305100495677983
+0.1,1.0,0.5,weighted_blend,,xgboost;catboost;random_forest,0.3439;0.3310;0.3251,0.7092857142857143,0.08245744338610121,0.28775510204081634,2,0.004,1,9,9.1,20,0.01,0.02305100495677983

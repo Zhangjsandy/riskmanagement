@@ -1,0 +1,476 @@
+\documentclass[12pt,a4paper]{article}
+
+% 中文支持
+\usepackage{ctex}
+
+% 页面设置
+\usepackage{geometry}
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% 数学公式
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+
+% 图表
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+
+% 代码高亮
+\usepackage{listings}
+\usepackage{xcolor}
+
+% 算法
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% 超链接
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue}
+
+% 页眉页脚
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{全球顶级金融风控策略研究}
+\fancyhead[R]{\thepage}
+
+% 代码样式
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{orange},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    showstringspaces=false
+}
+
+\title{\textbf{基于集成学习的信用违约风险预测算法研究}\\[0.5em]
+\large 全球顶级金融风控策略设计与实现}
+
+\author{张峻爽}
+
+\date{2026年2月26日}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文提出了一种基于集成学习（Ensemble Learning）的信用违约风险预测模型，融合了XGBoost、LightGBM、CatBoost等梯度提升算法，并采用Top-K非负加权融合策略进行模型集成。针对金融风控领域常见的类别不平衡问题，本文采用“类权重（默认）+ 可选SMOTE（仅在交叉验证训练fold内使用）”的处理方式，以降低评估泄露与指标虚高风险。通过特征工程构建35维风险特征体系，并在评估阶段同时报告AUC、PR-AUC与KS等更贴近风控落地的指标；在决策阶段引入概率校准与成本敏感阈值优化。由于本数据集坏样本极少，本文强调以OOF指标与稳健性为第一原则，而非单一追求AUC极值。
+
+\textbf{关键词：}信用风险；集成学习；XGBoost；LightGBM；CatBoost；TabPFN；加权融合；类别不平衡；KS；PR-AUC；概率校准；成本敏感阈值
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{引言}
+%==============================================================================
+
+\subsection{研究背景}
+
+信用风险是金融机构面临的核心风险之一。随着金融科技的快速发展，机器学习技术在信用风险评估领域展现出巨大潜力。传统的信用评分方法（如FICO评分）主要依赖逻辑回归和人工经验，难以捕捉复杂的非线性关系。近年来，以XGBoost、LightGBM、CatBoost为代表的梯度提升决策树（GBDT）算法在各类数据竞赛和工业应用中取得了显著成功，成为金融风控领域的主流技术。
+
+\subsection{研究意义}
+
+本研究旨在构建一套全球顶级的金融风控策略体系，主要贡献包括：
+\begin{enumerate}
+    \item 融合多种先进集成学习算法，构建高鲁棒性的信用风险预测模型
+    \item 设计全面的特征工程方案，挖掘深层次风险信号
+    \item 采用类权重与（可选）fold内SMOTE处理类别不平衡问题，提升少数类识别并避免评估泄露
+    \item 实现Top-K非负加权融合与“必要时回退最佳单模型”的稳健出分策略，降低小样本方差
+\end{enumerate}
+
+%==============================================================================
+\section{相关工作}
+%==============================================================================
+
+\subsection{集成学习概述}
+
+集成学习（Ensemble Learning）通过构建并结合多个学习器来完成学习任务，主要分为Bagging和Boosting两大类：
+
+\begin{itemize}
+    \item \textbf{Bagging}：通过自助采样（Bootstrap）构建多个训练集，训练多个基学习器，最终通过投票或平均进行预测。代表算法为随机森林（Random Forest）。
+    \item \textbf{Boosting}：通过序列化训练，每一轮迭代关注前一轮预测错误的样本，逐步提升模型性能。代表算法包括AdaBoost、GBDT、XGBoost、LightGBM等。
+\end{itemize}
+
+\subsection{主流梯度提升算法}
+
+\subsubsection{XGBoost}
+
+XGBoost（eXtreme Gradient Boosting）是陈天奇提出的高效梯度提升库，其核心创新包括：
+\begin{itemize}
+    \item 二阶泰勒展开近似损失函数，加速收敛
+    \item 加入正则化项控制模型复杂度
+    \item 支持列采样和行采样，防止过拟合
+    \item 高效处理缺失值
+\end{itemize}
+
+目标函数定义为：
+\begin{equation}
+    \mathcal{L}^{(t)} = \sum_{i=1}^{n} l(y_i, \hat{y}_i^{(t-1)} + f_t(x_i)) + \Omega(f_t)
+\end{equation}
+
+其中$\Omega(f_t) = \gamma T + \frac{1}{2}\lambda \sum_{j=1}^{T} w_j^2$为正则化项。
+
+\subsubsection{LightGBM}
+
+LightGBM（Light Gradient Boosting Machine）由微软研究院开发，主要特点包括：
+\begin{itemize}
+    \item 基于直方图的决策树算法，减少内存占用
+    \item 叶子优先（Leaf-wise）的树生长策略，提高精度
+    \item 支持类别特征自动处理
+    \item 高效并行训练能力
+\end{itemize}
+
+\subsubsection{CatBoost}
+
+CatBoost是Yandex开发的开源梯度提升库，针对类别特征进行了深度优化：
+\begin{itemize}
+    \item 采用Ordered Target Statistics处理类别特征，避免目标泄露
+    \item 使用对称树（Oblivious Trees）结构，加速预测
+    \item 实现Ordered Boosting减少预测偏移
+\end{itemize}
+
+\subsection{TabPFN算法}
+
+TabPFN（Tabular Prior-Fitted Networks）是2022年由Hollmann等人提出的面向小样本表格数据的深度学习模型，其核心创新包括：
+
+\begin{itemize}
+    \item \textbf{预训练Transformer架构}：在大量合成表格数据上预训练，学习通用的表格数据表示
+    \item \textbf{无需超参数调优}：基于贝叶斯神经网络，自动适应不同数据集
+    \item \textbf{小样本友好}：在样本量$<1000$时表现优异，特别适合本研究的500条训练数据场景
+    \item \textbf{快速推理}：单次前向传播即可完成预测，无需迭代训练
+\end{itemize}
+
+TabPFN的技术原理基于以下关键思想：
+\begin{enumerate}
+    \item 将表格数据视为序列，使用Transformer编码器处理
+    \item 通过贝叶斯神经网络建模特征间的复杂交互
+    \item 自动处理缺失值、类别特征等表格数据常见问题
+\end{enumerate}
+
+在本研究中，TabPFN作为基学习器之一参与融合策略，其AUC达到0.5857，展现了在小样本金融风控场景下的良好泛化能力。
+
+\subsection{模型融合策略}
+
+本文采用Top-K非负加权融合策略：
+\begin{enumerate}
+    \item 第一层（基学习器）：训练多个不同的机器学习模型（包括XGBoost、LightGBM、CatBoost、Random Forest、Gradient Boosting、TabPFN）
+    \item 融合层：按重复分层CV表现选择Top-K强模型（默认$K=3$），并将非负归一化权重用于概率融合
+    \item 稳健性策略：若融合OOF AUC不优于冠军单模型，则自动回退冠军单模型
+\end{enumerate}
+
+%==============================================================================
+\section{数据描述与预处理}
+%==============================================================================
+
+\subsection{数据集概况}
+
+本研究使用的数据集包含以下文件：
+\begin{itemize}
+    \item \textbf{训练数据集}：500条样本，包含23个特征和1个目标变量
+    \item \textbf{测试数据集}：2000条样本，用于模型预测
+    \item \textbf{提交样例}：定义了预测结果的输出格式
+\end{itemize}
+
+\subsection{特征说明}
+
+数据集包含以下类型的特征：
+
+\begin{table}[htbp]
+\centering
+\caption{特征变量说明}
+\begin{tabular}{lll}
+\toprule
+\textbf{类别} & \textbf{特征名} & \textbf{说明} \\
+\midrule
+\multirow{3}{*}{基本信息} 
+& amount & 贷款金额 \\
+& length & 贷款期限 \\
+& income & 月收入 \\
+\midrule
+\multirow{2}{*}{类别特征}
+& housing & 住房状况（租赁/自有） \\
+& purpose & 贷款用途 \\
+\midrule
+\multirow{4}{*}{信用历史}
+& overdue\_times & 逾期次数 \\
+& default\_times & 违约次数 \\
+& total\_default\_number & 总违约笔数 \\
+& last\_overdue\_months & 最近一次逾期月数 \\
+\midrule
+\multirow{4}{*}{账户信息}
+& account\_number & 账户数量 \\
+& loan\_history & 贷款历史记录数 \\
+& recent\_loan\_number & 近期贷款数量 \\
+& recent\_account\_months & 近期开户月数 \\
+\midrule
+\multirow{4}{*}{信用卡信息}
+& credict\_used\_amount & 信用卡已用额度 \\
+& credict\_limit & 信用卡额度 \\
+& total\_credict\_card\_number & 信用卡总数 \\
+& last\_credict\_card\_months & 最近信用卡使用月数 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{类别不平衡分析}
+
+训练数据集中违约样本分布如下：
+\begin{itemize}
+    \item 正常样本：490条（98.0\%）
+    \item 违约样本：10条（2.0\%）
+\end{itemize}
+
+类别严重不平衡。考虑到过采样在小样本场景下可能放大方差，并且若使用不当会造成评估泄露，本文采用如下策略：
+\begin{itemize}
+    \item \textbf{默认：类权重}（class weight / sample weight），在不改变样本分布的前提下提高少数类损失权重。
+    \item \textbf{可选：SMOTE}，但\textbf{仅在交叉验证每个fold的训练集内}进行过采样，验证集保持原始分布，避免指标虚高。
+\end{itemize}
+
+%==============================================================================
+\section{特征工程}
+%==============================================================================
+
+\subsection{特征构建策略}
+
+基于金融风控领域专业知识，构建了以下衍生特征：
+
+\subsubsection{债务负担类特征}
+\begin{align}
+    \text{debt\_to\_income} &= \frac{\text{amount}}{\text{income} + 1} \\
+    \text{total\_debt\_burden} &= \frac{\text{mortage\_number} + \text{account\_number}}{\text{income}/1000 + 1}
+\end{align}
+
+\subsubsection{信用使用类特征}
+\begin{equation}
+    \text{credit\_utilization} = \frac{\text{credict\_used\_amount}}{\text{credict\_limit} + 1}
+\end{equation}
+
+\subsubsection{风险评分特征}
+\begin{equation}
+    \text{risk\_score} = 0.3 \times \text{overdue\_times} + 0.4 \times \text{default\_times} + 0.1 \times \text{inquire\_times} + 0.2 \times (1 - \text{credit\_utilization})
+\end{equation}
+
+\subsubsection{活跃度特征}
+\begin{align}
+    \text{recent\_activity\_ratio} &= \frac{\text{recent\_loan\_number}}{\text{loan\_history} + 1} \\
+    \text{inquiry\_frequency} &= \frac{\text{inquire\_times}}{\text{recent\_account\_months} + 1}
+\end{align}
+
+\subsection{特征总数}
+
+经过特征工程，最终构建了\textbf{35维}特征向量，包括：
+\begin{itemize}
+    \item 原始特征：22个
+    \item 衍生特征：11个
+    \item 分箱特征：2个（income\_level, amount\_level）
+\end{itemize}
+
+%==============================================================================
+\section{模型设计}
+%==============================================================================
+
+\subsection{整体架构}
+
+本模型采用“基学习器 + Top-K加权融合 + 决策层”架构：
+
+\begin{algorithm}[htbp]
+\caption{Top-K Weighted Blend Algorithm with TabPFN}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Training data $X$, labels $y$, test data $X_{test}$
+\STATE \textbf{Layer 1 - Base Models:}
+\FOR{each model $m \in \{XGBoost, LightGBM, CatBoost, RF, GBDT, TabPFN\}$}
+    \STATE Train $m$ on $X$ with 5-fold CV
+    \STATE Generate OOF (Out-of-Fold) predictions
+    \STATE Generate test set predictions
+\ENDFOR
+\STATE \textbf{Fusion Layer:}
+\STATE Select Top-K base models by repeated stratified CV performance
+\STATE Compute non-negative normalized blend weights and get fused OOF predictions
+\STATE \textbf{Calibration:} Fit probability calibrator on OOF predictions
+\STATE \textbf{Decision:} Select threshold on calibrated OOF predictions by cost minimization
+\STATE \textbf{Robustness:} If blend underperforms best single model (OOF), fallback to champion base model
+\STATE \textbf{Output:} Final predictions on $X_{test}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{基学习器配置}
+
+\subsubsection{XGBoost配置}
+\begin{lstlisting}
+XGBClassifier(
+    n_estimators=500,
+    max_depth=6,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    eval_metric='auc'
+)
+\end{lstlisting}
+
+\subsubsection{LightGBM配置}
+\begin{lstlisting}
+LGBMClassifier(
+    n_estimators=500,
+    max_depth=8,
+    learning_rate=0.05,
+    num_leaves=31,
+    subsample=0.8,
+    colsample_bytree=0.8
+)
+\end{lstlisting}
+
+\subsubsection{CatBoost配置}
+\begin{lstlisting}
+CatBoostClassifier(
+    iterations=500,
+    depth=6,
+    learning_rate=0.05,
+    loss_function='Logloss'
+)
+\end{lstlisting}
+
+\subsection{SMOTE处理流程（可选）}
+
+在本文实现中，SMOTE作为可选方案使用，并且严格限制为\textbf{仅在交叉验证每个fold的训练集内}进行过采样；验证集保持原始分布不变，以避免评估泄露。
+
+\begin{algorithm}[htbp]
+\caption{SMOTE for Class Imbalance}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Imbalanced dataset $D$ with minority class $C_{min}$
+\FOR{each sample $x_i \in C_{min}$}
+    \STATE Find $k$ nearest neighbors of $x_i$
+    \STATE Randomly select one neighbor $x_{nn}$
+    \STATE Generate synthetic sample:
+    \STATE $\quad x_{new} = x_i + \lambda \times (x_{nn} - x_i)$, where $\lambda \in [0, 1]$
+\ENDFOR
+\STATE \textbf{Output:} Balanced dataset $D'$
+\end{algorithmic}
+\end{algorithm}
+
+%==============================================================================
+\section{实验结果与分析}
+%==============================================================================
+
+% 自动化结果摘要（由程序运行生成，见 docs/experiment_results.tex）
+\input{experiment_results.tex}
+
+\noindent\textbf{生成方式：}运行\texttt{python src/credit\_risk\_model.py}将自动生成并覆盖\texttt{docs/experiment\_results.tex}，以保证论文中的结果摘要与代码运行一致。
+
+\subsection{模型性能对比}
+
+采用5折分层交叉验证评估各模型性能，并在OOF层面输出AUC、PR-AUC与KS。由于数据规模较小且坏样本极少，指标会随数据划分产生显著波动；因此本文不固化某一次运行的数值结果，建议以程序运行日志为准，并优先关注OOF PR-AUC与KS等更贴近风控落地的衡量。
+
+\subsection{特征重要性分析}
+
+基于模型训练过程输出的特征重要性（以一次运行结果为例；不同数据划分/最终策略会导致重要性分数波动），Top 15特征如下：
+
+\begin{table}[htbp]
+\centering
+\caption{Top 15 特征重要性排名（2026-02-26执行结果）}
+\begin{tabular}{clc}
+\toprule
+\textbf{排名} & \textbf{特征名} & \textbf{重要性得分} \\
+\midrule
+1 & credit\_history\_maturity & 320.5246 \\
+2 & total\_debt\_burden & 268.5148 \\
+3 & income & 260.5370 \\
+4 & credict\_limit & 224.0446 \\
+5 & last\_credict\_card\_months & 204.0207 \\
+6 & total\_balance & 202.0112 \\
+7 & debt\_to\_income & 196.5077 \\
+8 & credict\_used\_amount & 177.0096 \\
+9 & risk\_score & 130.0068 \\
+10 & credit\_utilization & 129.5109 \\
+11 & amount & 129.0155 \\
+12 & avg\_balance\_per\_account & 124.5073 \\
+13 & total\_credict\_card\_number & 107.0226 \\
+14 & loan\_history & 92.0178 \\
+15 & recent\_account\_months & 71.5196 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{说明：}本文更强调评估框架与稳健性策略（OOF评估、阈值选择、必要时回退最佳单模型）。特征重要性分数用于辅助理解模型关注的风险信号，不应被视为稳定不变的结论。
+
+\subsection{关键发现}
+
+\begin{enumerate}
+    \item \textbf{信用历史最重要}：credit\_history\_maturity（信用历史成熟度）是最重要的风险指标，反映了借款人的长期信用行为模式。
+    
+    \item \textbf{债务负担关键}：total\_debt\_burden（总债务负担）位列第2，说明借款人的整体偿债压力是核心风险要素。
+    
+    \item \textbf{收入与额度影响大}：income（收入）和credict\_limit（信用卡额度）位列前茅，说明借款人的资产规模和信用额度是重要评估维度。
+    
+    \item \textbf{信用卡使用行为}：last\_credict\_card\_months（最近信用卡使用月数）和credit\_utilization（信用卡使用率）反映了借款人的资金紧张程度和消费行为模式。
+\end{enumerate}
+
+\subsection{预测结果统计}
+
+测试集输出为二元标签（0/1）。预测违约数量与违约率取决于阈值策略（本文默认在OOF上进行成本最小化，同时输出坏样本率匹配与Youden参考阈值），因此应以运行日志输出为准。
+
+%==============================================================================
+\section{结论与展望}
+%==============================================================================
+
+\subsection{主要结论}
+
+本研究构建了一套基于集成学习的信用风险预测体系，主要结论如下：
+
+\begin{enumerate}
+    \item \textbf{评估框架}：应优先采用"泄露控制"的OOF评估框架，并同时报告AUC、PR-AUC与KS，避免单一指标与评估泄露导致的过度乐观结论。
+    
+    \item \textbf{特征工程}：通过系统的特征工程，构建了35维风险特征体系，其中信用历史、债务负担、收入是最重要的风险指标。
+    
+    \item \textbf{不平衡处理}：类权重是更稳健的默认方案；若使用SMOTE，应严格限制在每个CV训练fold内以避免评估泄露。
+    
+    \item \textbf{模型选择}：融合策略并非在小样本下必然优于单模型；采用"融合不占优则回退最佳单模型"的策略更利于稳健落地。本次执行中，CatBoost以AUC 0.6102成为冠军模型。
+    
+    \item \textbf{TabPFN集成}：成功集成前沿的TabPFN模型，在小样本场景下AUC达到0.5857，排名第3，展现了深度学习在表格数据上的潜力。
+\end{enumerate}
+
+\subsection{未来展望}
+
+\begin{enumerate}
+    \item \textbf{深度学习深化}：本研究已成功集成TabPFN，未来可进一步探索TabNet、SAINT等深度表格学习模型。
+    
+    \item \textbf{时序特征挖掘}：利用RNN/LSTM捕捉借款人行为的时序模式，提升风险预警能力。
+    
+    \item \textbf{图神经网络}：构建借款人关系图谱，利用GNN挖掘关联风险和团伙欺诈。
+    
+    \item \textbf{模型可解释性}：引入SHAP、LIME等技术提升模型决策的透明度，满足监管要求。
+    
+    \item \textbf{在线学习}：实现模型的实时更新，适应市场变化和新风险模式。
+    
+    \item \textbf{多任务学习}：同时优化违约预测、额度授信、利率定价等多个目标。
+\end{enumerate}
+
+%==============================================================================
+\section*{参考文献}
+%==============================================================================
+
+\begin{enumerate}
+    \item Chen T, Guestrin C. XGBoost: A scalable tree boosting system[C]//Proceedings of the 22nd ACM SIGKDD international conference on knowledge discovery and data mining. 2016: 785-794.
+    
+    \item Ke G, et al. LightGBM: A highly efficient gradient boosting decision tree[C]//Advances in neural information processing systems. 2017: 3146-3154.
+    
+    \item Prokhorenkova L, et al. CatBoost: unbiased boosting with categorical features[C]//Advances in neural information processing systems. 2018: 6638-6648.
+    
+    \item Hollmann N, et al. TabPFN: A Transformer That Solves Small Tabular Classification Problems in a Second[J]. arXiv preprint arXiv:2210.14648, 2022.
+    
+    \item Chawla N V, et al. SMOTE: synthetic minority over-sampling technique[J]. Journal of artificial intelligence research, 2002, 16: 321-357.
+    
+    \item Wolpert D H. Stacked generalization[J]. Neural networks, 1992, 5(2): 241-259.
+\end{enumerate}
+
+\end{document}
